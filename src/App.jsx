@@ -2,20 +2,21 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ClipboardList, Trophy, Save, Calendar, Clock, 
   ChevronLeft, ChevronRight, Trash2, BarChart3, 
-  School, X, Check, CheckCircle2, AlertTriangle, Lock
+  School, CheckCircle2, AlertTriangle, Lock, Settings,
+  MessageSquare // 新增圖標
 } from 'lucide-react';
 
 // --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, doc, onSnapshot, 
-  serverTimestamp, writeBatch, getDocs
+  serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc
 } from 'firebase/firestore';
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
 } from 'firebase/auth';
 
-// Your web app's Firebase configuration
+// --- Configuration ---
 const firebaseConfig = {
   apiKey: "AIzaSyDwdwx7-hcD9OFo_vfRVoI7ZZwyy-QHrvI",
   authDomain: "school-orderliness.firebaseapp.com",
@@ -24,26 +25,32 @@ const firebaseConfig = {
   messagingSenderId: "479350417864",
   appId: "1:479350417864:web:d44c8030b4900b195378fd"
 };
+
+// 初始化 Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
+const APP_ID_PATH = 'school-system-v1'; 
 const COLLECTION_NAME = "school_orderliness_scores_v2";
+
+const SETTINGS_COLLECTION = "system_settings"; 
+const SETTINGS_DOC_ID = "config"; 
 
 // --- Constants & Data ---
 const GRADES = [1, 2, 3];
+const PERIODS = ["早自修", "升旗/集會", "上課秩序", "午休", "打掃時間", "放學"];
 
-const CLASS_COUNTS = {
-  1: 4, // 一年級 4 班
-  2: 5, // 二年級 5 班
-  3: 5  // 三年級 5 班
+// Default counts if no settings found
+const DEFAULT_CLASS_COUNTS = {
+  1: 4, 
+  2: 5, 
+  3: 5  
 };
 
-const generateClasses = (grade) => 
-  Array.from({ length: CLASS_COUNTS[grade] || 0 }, (_, i) => `${grade}${String(i + 1).padStart(2, '0')}`);
-
-const PERIODS = ["早自修", "升旗/集會", "上課秩序", "午休", "打掃時間", "放學"];
+// Helper: Generate Classes Array based on counts
+const generateClasses = (grade, counts) => 
+  Array.from({ length: counts[grade] || 0 }, (_, i) => `${grade}${String(i + 1).padStart(2, '0')}`);
 
 // Helper: Get Week Number
 const getWeekNumber = (d) => {
@@ -64,17 +71,24 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  // UI Components State (Modals & Toasts)
+  // Settings State
+  const [classCounts, setClassCounts] = useState(DEFAULT_CLASS_COUNTS);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [tempCounts, setTempCounts] = useState(DEFAULT_CLASS_COUNTS); // For editing in modal
+
+  // UI Components State
   const [modalConfig, setModalConfig] = useState({ isOpen: false, type: '', title: '', message: '', onConfirm: null });
-  const [toast, setToast] = useState({ show: false, message: '', type: 'success' }); // type: success | error
+  const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminModal, setShowAdminModal] = useState(false);
+  const [adminAction, setAdminAction] = useState(null); // 'CLEAR_HISTORY' | 'OPEN_SETTINGS'
 
   // Scoring Form State
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [selectedPeriod, setSelectedPeriod] = useState("早自修");
   const [selectedGrade, setSelectedGrade] = useState(1);
   const [currentScores, setCurrentScores] = useState({}); 
+  const [feedback, setFeedback] = useState(""); // 新增：反映事項
 
   // Ranking View State
   const [viewWeek, setViewWeek] = useState(getWeekNumber(new Date()));
@@ -83,11 +97,7 @@ const App = () => {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+        await signInAnonymously(auth);
       } catch (e) {
         console.error("Firebase Auth Error:", e);
         showToast(`登入失敗: ${e.message}`, 'error');
@@ -102,20 +112,49 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
+  // Sync Scores Data
   useEffect(() => {
     if (!authReady || !user) return;
     
-    const q = collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME);
+    const q = query(
+      collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
+      orderBy('createdAt', 'desc')
+    );
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setScoresData(data);
       setLoading(false);
     }, (error) => {
       console.error("Snapshot Error:", error);
-      showToast("無法讀取資料，請檢查網路", 'error');
+      if (error.code !== 'permission-denied') {
+        showToast("無法讀取資料，請檢查網路", 'error');
+      }
       setLoading(false);
     });
     return () => unsubscribe();
+  }, [authReady, user]);
+
+  // Sync Settings Data
+  useEffect(() => {
+    if (!authReady || !user) return;
+
+    try {
+      const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', SETTINGS_COLLECTION, SETTINGS_DOC_ID);
+      const unsubscribe = onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.classCounts) {
+            setClassCounts(data.classCounts);
+          }
+        }
+      }, (error) => {
+        console.error("Settings Sync Error:", error);
+      });
+      return () => unsubscribe();
+    } catch (e) {
+      console.error("Invalid Path Error:", e);
+    }
   }, [authReady, user]);
 
   // --- Helper UI Functions ---
@@ -134,18 +173,21 @@ const App = () => {
     const todayWeek = getWeekNumber(new Date(selectedDate)); 
     const filtered = scoresData.filter(d => d.week === todayWeek);
     const totals = {}; 
-    GRADES.forEach(g => generateClasses(g).forEach(c => totals[c] = 0));
+    // Init with current class config
+    GRADES.forEach(g => generateClasses(g, classCounts).forEach(c => totals[c] = 0));
+    
     filtered.forEach(record => {
       if (totals[record.classId] === undefined) totals[record.classId] = 0;
       totals[record.classId] += record.score;
     });
     return totals; 
-  }, [scoresData, selectedDate]);
+  }, [scoresData, selectedDate, classCounts]);
 
   const weeklyRankings = useMemo(() => {
     const filtered = scoresData.filter(d => d.week === viewWeek);
     const totals = {}; 
-    GRADES.forEach(g => generateClasses(g).forEach(c => totals[c] = 0));
+    GRADES.forEach(g => generateClasses(g, classCounts).forEach(c => totals[c] = 0));
+    
     filtered.forEach(record => {
       if (totals[record.classId] === undefined) totals[record.classId] = 0;
       totals[record.classId] += record.score;
@@ -158,7 +200,7 @@ const App = () => {
       result[g] = sorted;
     });
     return result;
-  }, [scoresData, viewWeek]);
+  }, [scoresData, viewWeek, classCounts]);
 
   const currentWeekLabel = useMemo(() => {
      const parts = viewWeek.split('-W');
@@ -167,7 +209,6 @@ const App = () => {
   }, [viewWeek]);
 
   // --- Handlers ---
-
   const handleScoreChange = (classId, val) => {
     setCurrentScores(prev => ({ ...prev, [classId]: val }));
   };
@@ -198,7 +239,7 @@ const App = () => {
       
       let opCount = 0;
       Object.entries(currentScores).forEach(([classId, score]) => {
-        const docRef = doc(collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME));
+        const docRef = doc(collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME));
         const gradeNum = parseInt(classId.substring(0, 1), 10);
         const scoreNum = Number(score);
         
@@ -210,6 +251,7 @@ const App = () => {
             grade: gradeNum,
             classId: String(classId),
             score: scoreNum,
+            note: feedback.trim(), // 新增：儲存備註
             createdAt: timestamp,
             raterUid: raterUid
           });
@@ -221,6 +263,7 @@ const App = () => {
         await batch.commit();
         showToast(`成功儲存 ${opCount} 筆評分！`, 'success');
         setCurrentScores({});
+        setFeedback(""); // 清空備註
       } else {
         showToast("沒有有效的評分數據", 'error');
       }
@@ -246,7 +289,7 @@ const App = () => {
     closeModal();
     try {
       const batch = writeBatch(db);
-      const docRef = doc(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME, recordId);
+      const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME, recordId);
       batch.delete(docRef);
       await batch.commit();
       showToast("紀錄已刪除", 'success');
@@ -255,11 +298,13 @@ const App = () => {
     }
   };
 
-  const handleClearHistoryRequest = () => {
+  // --- Admin Logic ---
+  const requestAdminAction = (action) => {
+    setAdminAction(action);
     setShowAdminModal(true);
   };
 
-  const executeClearHistory = async () => {
+  const verifyAdminPassword = () => {
     if (adminPassword !== "admin888") {
       showToast("密碼錯誤", 'error');
       return;
@@ -267,6 +312,16 @@ const App = () => {
     setShowAdminModal(false);
     setAdminPassword('');
     
+    // Dispatch Action
+    if (adminAction === 'CLEAR_HISTORY') {
+      confirmClearHistory();
+    } else if (adminAction === 'OPEN_SETTINGS') {
+      setTempCounts({...classCounts}); // Init temp state with current values
+      setShowSettingsModal(true);
+    }
+  };
+
+  const confirmClearHistory = () => {
     setModalConfig({
       isOpen: true,
       type: 'delete',
@@ -276,7 +331,7 @@ const App = () => {
         closeModal();
         setSubmitting(true);
         try {
-          const q = collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME);
+          const q = collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME);
           const snapshot = await getDocs(q);
           const batch = writeBatch(db);
           snapshot.docs.forEach(doc => batch.delete(doc.ref));
@@ -289,6 +344,21 @@ const App = () => {
         }
       }
     });
+  };
+
+  const saveSettings = async () => {
+    setShowSettingsModal(false);
+    setSubmitting(true);
+    try {
+        // FIX: Use 6-segment path
+        const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', SETTINGS_COLLECTION, SETTINGS_DOC_ID);
+        await setDoc(docRef, { classCounts: tempCounts }, { merge: true });
+        showToast("系統設定已更新", 'success');
+    } catch(e) {
+        showToast(`設定儲存失敗: ${e.message}`, 'error');
+    } finally {
+        setSubmitting(false);
+    }
   };
 
   const changeWeek = (delta) => {
@@ -412,11 +482,50 @@ const App = () => {
             </div>
             <div className="p-4 bg-slate-50 flex gap-3">
               <button onClick={() => setShowAdminModal(false)} className="flex-1 py-2 text-slate-500 font-bold hover:bg-slate-200 rounded-lg">取消</button>
-              <button onClick={executeClearHistory} className="flex-1 py-2 bg-slate-900 text-white font-bold rounded-lg hover:bg-black">驗證</button>
+              <button onClick={verifyAdminPassword} className="flex-1 py-2 bg-slate-900 text-white font-bold rounded-lg hover:bg-black">驗證</button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Settings Modal (New) */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden">
+             <div className="p-4 bg-slate-800 text-white flex items-center gap-2">
+              <Settings size={20}/>
+              <h3 className="font-bold">系統參數設定</h3>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-500 border-b border-slate-100 pb-2">請設定各年級的班級總數：</p>
+              {GRADES.map(grade => (
+                <div key={grade} className="flex items-center justify-between">
+                  <label className="font-bold text-slate-700">{grade} 年級</label>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setTempCounts(prev => ({...prev, [grade]: Math.max(1, (prev[grade] || 0) - 1)}))}
+                      className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
+                    >-</button>
+                    <span className="w-12 text-center font-bold text-xl">{tempCounts[grade]} 班</span>
+                    <button 
+                      onClick={() => setTempCounts(prev => ({...prev, [grade]: Math.min(20, (prev[grade] || 0) + 1)}))}
+                      className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
+                    >+</button>
+                  </div>
+                </div>
+              ))}
+              <div className="text-xs text-slate-400 bg-slate-50 p-2 rounded mt-2">
+                注意：減少班級數將導致該班級從評分表中隱藏，但歷史數據仍會保留。
+              </div>
+            </div>
+            <div className="p-4 bg-slate-50 flex gap-3">
+              <button onClick={() => setShowSettingsModal(false)} className="flex-1 py-2 text-slate-500 font-bold hover:bg-slate-200 rounded-lg">取消</button>
+              <button onClick={saveSettings} className="flex-1 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 shadow">儲存設定</button>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Toast Notification */}
       <div className={`fixed bottom-24 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 ${toast.show ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'}`}>
@@ -441,11 +550,16 @@ const App = () => {
               </p>
             </div>
           </div>
-          {activeTab === 'history' && (
-             <button onClick={handleClearHistoryRequest} className="text-xs bg-red-900/50 text-red-200 px-3 py-1.5 rounded border border-red-800 hover:bg-red-900 flex items-center gap-1">
-               <Trash2 size={12}/> 清除資料
-             </button>
-          )}
+          <div className="flex gap-2">
+            {activeTab === 'history' && (
+               <button onClick={() => requestAdminAction('CLEAR_HISTORY')} className="text-xs bg-red-900/50 text-red-200 px-3 py-1.5 rounded border border-red-800 hover:bg-red-900 flex items-center gap-1">
+                 <Trash2 size={12}/> 清除資料
+               </button>
+            )}
+            <button onClick={() => requestAdminAction('OPEN_SETTINGS')} className="p-2 bg-slate-800 rounded hover:bg-slate-700 text-slate-300 hover:text-white transition-colors">
+              <Settings size={20} />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -521,14 +635,28 @@ const App = () => {
               </div>
             </div>
 
-            <div className="space-y-3 mb-20">
-              {generateClasses(selectedGrade).map(classId => (
+            <div className="space-y-3 mb-6">
+              {generateClasses(selectedGrade, classCounts).map(classId => (
                 <ClassScoreRow 
                   key={classId} 
                   classId={classId} 
                   currentWeekTotal={currentWeekTotals[classId] || 0} 
                 />
               ))}
+            </div>
+
+            {/* 新增：反映事項 (Feedback Input) */}
+            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-20">
+              <label className="block text-xs font-bold text-slate-400 mb-2 uppercase flex items-center gap-2">
+                <MessageSquare size={14}/> 
+                反映事項 (選填)
+              </label>
+              <textarea
+                value={feedback}
+                onChange={(e) => setFeedback(e.target.value)}
+                className="w-full p-3 border border-slate-200 rounded-lg bg-slate-50 focus:border-indigo-500 outline-none text-sm min-h-[80px]"
+                placeholder="請輸入評分時的特殊狀況或是備註..."
+              />
             </div>
 
             <div className="fixed bottom-6 left-0 right-0 px-4 z-30 max-w-3xl mx-auto">
@@ -660,11 +788,18 @@ const App = () => {
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-slate-100">
-                     {scoresData.sort((a,b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)).map(record => (
+                     {scoresData.map(record => (
                        <tr key={record.id} className="hover:bg-slate-50 group">
                          <td className="p-3">
                            <div className="font-bold text-slate-700">{record.classId}</div>
                            <div className="text-xs text-slate-400">{record.date}</div>
+                           {/* 顯示備註 */}
+                           {record.note && (
+                             <div className="mt-1 text-xs text-slate-500 flex items-start gap-1 bg-slate-50 p-1 rounded">
+                                <MessageSquare size={10} className="mt-0.5 shrink-0"/>
+                                <span>{record.note}</span>
+                             </div>
+                           )}
                          </td>
                          <td className="p-3">
                            <span className="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded-full border border-indigo-100">
