@@ -10,7 +10,7 @@ import {
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, doc, onSnapshot, 
-  serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc
+  serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc, limit // 新增 limit
 } from 'firebase/firestore';
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
@@ -116,9 +116,11 @@ const App = () => {
   useEffect(() => {
     if (!authReady || !user) return;
     
+    // FIX: 加上 limit(500) 限制讀取數量，避免隨著資料變多而爆量
     const q = query(
       collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
-      orderBy('createdAt', 'desc')
+      orderBy('createdAt', 'desc'),
+      limit(500) 
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
