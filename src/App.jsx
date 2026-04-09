@@ -10,7 +10,7 @@ import {
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, doc, onSnapshot, 
-  serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc, limit // 新增 limit
+  serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc, limit 
 } from 'firebase/firestore';
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
@@ -46,6 +46,15 @@ const DEFAULT_CLASS_COUNTS = {
   1: 4, 
   2: 5, 
   3: 5  
+};
+
+// Helper: 取得本地時區的今天日期字串 (YYYY-MM-DD)，解決 UTC+8 早上八點前判定為昨天的問題
+const getLocalDateString = () => {
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 };
 
 // Helper: Generate Classes Array based on counts
@@ -84,11 +93,12 @@ const App = () => {
   const [adminAction, setAdminAction] = useState(null); // 'CLEAR_HISTORY' | 'OPEN_SETTINGS'
 
   // Scoring Form State
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  // 修改這裡：使用 getLocalDateString() 而非 toISOString()
+  const [selectedDate, setSelectedDate] = useState(getLocalDateString());
   const [selectedPeriod, setSelectedPeriod] = useState("早自修");
   const [selectedGrade, setSelectedGrade] = useState(1);
   const [currentScores, setCurrentScores] = useState({}); 
-  const [feedback, setFeedback] = useState(""); // 新增：反映事項
+  const [feedback, setFeedback] = useState(""); // 反映事項
 
   // Ranking View State
   const [viewWeek, setViewWeek] = useState(getWeekNumber(new Date()));
@@ -116,7 +126,7 @@ const App = () => {
   useEffect(() => {
     if (!authReady || !user) return;
     
-    // FIX: 加上 limit(500) 限制讀取數量，避免隨著資料變多而爆量
+    // 限制讀取最新 500 筆
     const q = query(
       collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
       orderBy('createdAt', 'desc'),
@@ -253,7 +263,7 @@ const App = () => {
             grade: gradeNum,
             classId: String(classId),
             score: scoreNum,
-            note: feedback.trim(), // 新增：儲存備註
+            note: feedback.trim(), 
             createdAt: timestamp,
             raterUid: raterUid
           });
@@ -265,7 +275,7 @@ const App = () => {
         await batch.commit();
         showToast(`成功儲存 ${opCount} 筆評分！`, 'success');
         setCurrentScores({});
-        setFeedback(""); // 清空備註
+        setFeedback(""); 
       } else {
         showToast("沒有有效的評分數據", 'error');
       }
@@ -352,7 +362,6 @@ const App = () => {
     setShowSettingsModal(false);
     setSubmitting(true);
     try {
-        // FIX: Use 6-segment path
         const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', SETTINGS_COLLECTION, SETTINGS_DOC_ID);
         await setDoc(docRef, { classCounts: tempCounts }, { merge: true });
         showToast("系統設定已更新", 'success');
@@ -490,7 +499,7 @@ const App = () => {
         </div>
       )}
 
-      {/* Settings Modal (New) */}
+      {/* Settings Modal */}
       {showSettingsModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden">
@@ -647,7 +656,7 @@ const App = () => {
               ))}
             </div>
 
-            {/* 新增：反映事項 (Feedback Input) */}
+            {/* 反映事項 (Feedback Input) */}
             <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-20">
               <label className="block text-xs font-bold text-slate-400 mb-2 uppercase flex items-center gap-2">
                 <MessageSquare size={14}/> 
