@@ -297,10 +297,13 @@ const App = () => {
             const finalSortedClasses = [];
 
             sortedScores.forEach(score => {
-                let tiedClasses = grouped[score];
+                // 複製一份該分數的所有班級陣列
+                let tiedClasses = [...grouped[score]];
 
-                if (tiedClasses.length > 1) {
+                // 當同一分數群組中還有班級未被排入名次時，逐一抽出
+                while (tiedClasses.length > 0) {
                     if (currentRankIndex === 0) {
+                        // 正在選出第一名：套用第一名平手規則
                         tiedClasses.sort((a, b) => {
                             const histA = history[g][a] || { lastWeekFirst: false, firsts: 0 };
                             const histB = history[g][b] || { lastWeekFirst: false, firsts: 0 };
@@ -309,8 +312,12 @@ const App = () => {
                             if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
                             return a.localeCompare(b);
                         });
-                    }
+                        const winner = tiedClasses.shift(); // 抽出第一名
+                        finalSortedClasses.push({ classId: winner, total: score });
+                        currentRankIndex++;
+                    } 
                     else if (currentRankIndex === 1) {
+                        // 正在選出第二名：套用第二名平手規則 (即使是跟第一名同分剩下的，也會套用此規則)
                         tiedClasses.sort((a, b) => {
                             const histA = history[g][a] || { awards: 0 };
                             const histB = history[g][b] || { awards: 0 };
@@ -318,19 +325,20 @@ const App = () => {
                             if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
                             return a.localeCompare(b);
                         });
-                    }
+                        const secondPlace = tiedClasses.shift(); // 抽出第二名
+                        finalSortedClasses.push({ classId: secondPlace, total: score });
+                        currentRankIndex++;
+                    } 
                     else {
+                        // 第三名之後：單純依照班級名稱排序
                         tiedClasses.sort((a, b) => a.localeCompare(b));
+                        tiedClasses.forEach(c => {
+                            finalSortedClasses.push({ classId: c, total: score });
+                            currentRankIndex++;
+                        });
+                        tiedClasses = []; // 清空陣列以結束 while 迴圈
                     }
                 }
-
-                tiedClasses.forEach(c => {
-                    finalSortedClasses.push({
-                        classId: c,
-                        total: score
-                    });
-                    currentRankIndex++; 
-                });
             });
 
             // 更新歷史紀錄供「下一週」的判定使用
