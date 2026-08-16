@@ -238,10 +238,12 @@ const App = () => {
 
   // 計算排行榜的資料 (加入平手判定機制與三連霸紀錄)
   const rankingStats = useMemo(() => {
-    // 為了實作「歷史 tie-breaker」，必須從第 1 週開始模擬計算到目前的 viewWeekNum
+    // 為了實作「歷史 tie-breaker」，必須從最舊的週次開始模擬計算到目前的 viewWeekNum
+    const minWeek = Math.min(viewWeekNum, ...scoresData.map(d => getSemesterWeek(d.date, settings.semesterStart)), 1);
     const maxWeek = Math.max(viewWeekNum, ...scoresData.map(d => getSemesterWeek(d.date, settings.semesterStart)), 1);
+    
     const rankingsMap = {};
-    const history = {}; // 紀錄歷史獎項: { [grade]: { [classId]: { firsts: 0, awards: 0, lastWeekFirst: false, streak: 0 } } }
+    const history = {}; 
 
     // 初始化歷史紀錄
     GRADES.forEach(g => {
@@ -251,15 +253,15 @@ const App = () => {
         });
     });
 
-    // 依序計算每週的排行榜，以建立穩定的歷史狀態
-    for (let w = 1; w <= maxWeek; w++) {
+    // 依序計算每週的排行榜，以建立穩定的歷史狀態 (涵蓋負數週次)
+    for (let w = minWeek; w <= maxWeek; w++) {
         rankingsMap[w] = {};
         const weekRecords = scoresData.filter(d => getSemesterWeek(d.date, settings.semesterStart) === w);
 
         GRADES.forEach(g => {
             const gradeClasses = generateClasses(g, settings.classCounts);
             const totals = {};
-            const earliestTimes = {}; // 紀錄各班當週「最早獲得加分」的時間戳記
+            const earliestTimes = {}; 
 
             // 初始化
             gradeClasses.forEach(c => {
@@ -271,7 +273,6 @@ const App = () => {
             weekRecords.forEach(r => {
                 if (r.classId.startsWith(String(g))) {
                     totals[r.classId] += r.score;
-                    // 若是加分，且有時間戳記，則更新最早時間
                     if (r.score > 0 && r.createdAt) {
                         const time = r.createdAt.seconds || Infinity;
                         if (time < earliestTimes[r.classId]) {
@@ -281,7 +282,7 @@ const App = () => {
                 }
             });
 
-            // 先依據總分進行分組 (例如: { 10: ["101", "102"], 8: ["103"] })
+            // 先依據總分進行分組
             const grouped = {};
             gradeClasses.forEach(c => {
                 const score = totals[c];
@@ -292,56 +293,37 @@ const App = () => {
             // 取得由大到小的分數陣列
             const sortedScores = Object.keys(grouped).map(Number).sort((a, b) => b - a);
 
-            let currentRankIndex = 0; // 用來追蹤現在正在排第幾名 (0=第一名, 1=第二名)
+            let currentRankIndex = 0; 
             const finalSortedClasses = [];
 
             sortedScores.forEach(score => {
                 let tiedClasses = grouped[score];
 
-                // 當發生同分時，觸發 Tie-breaker 規則
                 if (tiedClasses.length > 1) {
-                    // 如果這組同分班級正在爭奪【第一名】
                     if (currentRankIndex === 0) {
                         tiedClasses.sort((a, b) => {
                             const histA = history[g][a] || { lastWeekFirst: false, firsts: 0 };
                             const histB = history[g][b] || { lastWeekFirst: false, firsts: 0 };
-
-                            // 條件1：上週也是第一名的優先
                             if (histA.lastWeekFirst !== histB.lastWeekFirst) return histA.lastWeekFirst ? -1 : 1;
-                            
-                            // 條件2：最少拿第一名的優先 (次數由少到多排序)
                             if (histA.firsts !== histB.firsts) return histA.firsts - histB.firsts;
-                            
-                            // 條件3：當週最先拿到分數優先 (時間由小到大排序)
                             if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
-                            
-                            // 條件4：隨機 (使用班級名稱字母順序作為穩定的隨機，避免畫面名次閃爍)
                             return a.localeCompare(b);
                         });
                     }
-                    // 如果這組同分班級正在爭奪【第二名】
                     else if (currentRankIndex === 1) {
                         tiedClasses.sort((a, b) => {
                             const histA = history[g][a] || { awards: 0 };
                             const histB = history[g][b] || { awards: 0 };
-
-                            // 條件1：最少獲獎(一或二名)的優先 (次數由少到多排序)
                             if (histA.awards !== histB.awards) return histA.awards - histB.awards;
-                            
-                            // 條件2：當週最先拿到分數優先
                             if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
-                            
-                            // 條件3：隨機
                             return a.localeCompare(b);
                         });
                     }
-                    // 若是第三名以後的同分，只做簡單的班級名稱排序
                     else {
                         tiedClasses.sort((a, b) => a.localeCompare(b));
                     }
                 }
 
-                // 將排序好的班級依序推入最終陣列，並佔用名次空位
                 tiedClasses.forEach(c => {
                     finalSortedClasses.push({
                         classId: c,
@@ -351,11 +333,10 @@ const App = () => {
                 });
             });
 
-            // 更新歷史紀錄供「下一週」的判定使用 (包含重置沒拿第一名的連霸次數)
+            // 更新歷史紀錄供「下一週」的判定使用
             gradeClasses.forEach(c => {
                 if (history[g][c]) {
                     history[g][c].lastWeekFirst = false;
-                    // 如果該班級不是當週第一名，則連霸次數中斷歸零
                     if (finalSortedClasses.length === 0 || c !== finalSortedClasses[0].classId) {
                         history[g][c].streak = 0;
                     }
@@ -366,39 +347,39 @@ const App = () => {
                 const top1 = finalSortedClasses[0].classId;
                 if (history[g][top1]) {
                     history[g][top1].firsts += 1;
-                    history[g][top1].awards += 1; // 第一名也算一次獲獎
+                    history[g][top1].awards += 1; 
                     history[g][top1].lastWeekFirst = true;
-                    
-                    // 增加連霸次數
                     history[g][top1].streak += 1;
                     
-                    // 檢查是否達成三連霸
                     if (history[g][top1].streak === 3) {
                         finalSortedClasses[0].isThreeWeekChamp = true;
-                        history[g][top1].streak = 0; // 觸發後歸零重新計算
+                        history[g][top1].streak = 0; 
                     }
                 }
             }
             if (finalSortedClasses.length > 1) {
                 const top2 = finalSortedClasses[1].classId;
                 if (history[g][top2]) {
-                    history[g][top2].awards += 1; // 第二名獲獎
+                    history[g][top2].awards += 1; 
                 }
             }
 
-            rankingsMap[w] = finalSortedClasses;
+            // 致命錯誤修復：確保資料是存在各年級的屬性下，而不是覆蓋整個週次
+            rankingsMap[w][g] = finalSortedClasses; 
         });
     }
 
     return {
         currentRankings: rankingsMap[viewWeekNum] || {},
         allRankings: rankingsMap,
+        minAvailableWeek: minWeek, // 新增：輸出最小週次供列印表使用
         maxAvailableWeek: maxWeek
     };
   }, [scoresData, viewWeekNum, settings]);
 
   const currentRankings = rankingStats.currentRankings;
   const allRankings = rankingStats.allRankings;
+  const minAvailableWeek = rankingStats.minAvailableWeek;
   const maxAvailableWeek = rankingStats.maxAvailableWeek;
 
   const currentWeekLabel = getWeekRangeString(viewWeekNum, settings.semesterStart);
@@ -1152,7 +1133,7 @@ const App = () => {
            </tr>
          </thead>
          <tbody>
-           {Array.from({ length: maxAvailableWeek }, (_, i) => i + 1).map(w => (
+           {Array.from({ length: maxAvailableWeek - minAvailableWeek + 1 }, (_, i) => i + minAvailableWeek).map(w => (
              <tr key={w}>
                <td className="border border-black p-2 font-bold whitespace-nowrap bg-gray-50">第 {w} 週</td>
                {GRADES.map(g => {
