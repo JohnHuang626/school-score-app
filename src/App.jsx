@@ -3,7 +3,7 @@ import {
   ClipboardList, Trophy, Save, Calendar, Clock, 
   ChevronLeft, ChevronRight, Trash2, BarChart3, 
   School, CheckCircle2, AlertTriangle, Lock, Settings,
-  MessageSquare // 新增圖標
+  MessageSquare, CalendarDays, Printer // 新增 Printer 圖標
 } from 'lucide-react';
 
 // --- Firebase Imports ---
@@ -13,7 +13,7 @@ import {
   serverTimestamp, writeBatch, getDocs, query, orderBy, setDoc, limit 
 } from 'firebase/firestore';
 import { 
-  getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
+  getAuth, signInAnonymously, onAuthStateChanged 
 } from 'firebase/auth';
 
 // --- Configuration ---
@@ -41,14 +41,14 @@ const SETTINGS_DOC_ID = "config";
 const GRADES = [1, 2, 3];
 const PERIODS = ["早自修", "升旗/集會", "上課秩序", "午休", "打掃時間", "放學"];
 
-// Default counts if no settings found
-const DEFAULT_CLASS_COUNTS = {
-  1: 4, 
-  2: 5, 
-  3: 5  
+// 預設系統參數 (包含班級數與學期起訖)
+const DEFAULT_SETTINGS = {
+  classCounts: { 1: 4, 2: 5, 3: 5 },
+  semesterStart: "2024-08-25", // 預設一個週日作為範例
+  semesterEnd: "2025-01-20"
 };
 
-// Helper: 取得本地時區的今天日期字串 (YYYY-MM-DD)，解決 UTC+8 早上八點前判定為昨天的問題
+// Helper: 取得本地時區的今天日期字串 (YYYY-MM-DD)，確保台灣時間正確
 const getLocalDateString = () => {
   const today = new Date();
   const yyyy = today.getFullYear();
@@ -57,19 +57,59 @@ const getLocalDateString = () => {
   return `${yyyy}-${mm}-${dd}`;
 };
 
-// Helper: Generate Classes Array based on counts
+// Helper: 將 YYYY-MM-DD 字串轉換為本地時區的 Date 物件 (午夜 00:00:00)
+const parseLocalDate = (dateStr) => {
+  if (!dateStr) return new Date();
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d); // JavaScript 月份是 0-11
+};
+
+// Helper: 計算某個日期屬於該學期的「第幾週」(星期日為一週之始)
+const getSemesterWeek = (targetDateStr, startStr) => {
+  if (!targetDateStr || !startStr) return 1;
+  const target = parseLocalDate(targetDateStr);
+  const start = parseLocalDate(startStr);
+  
+  // 找出「學期開始日」所在那一週的「星期日」作為第 1 週的起點
+  const startSunday = new Date(start);
+  startSunday.setDate(start.getDate() - start.getDay()); 
+  
+  // 找出「目標日」所在那一週的「星期日」
+  const targetSunday = new Date(target);
+  targetSunday.setDate(target.getDate() - target.getDay());
+  
+  // 計算兩個星期日相差幾週
+  const diffTime = targetSunday.getTime() - startSunday.getTime();
+  const diffWeeks = Math.round(diffTime / (7 * 24 * 60 * 60 * 1000));
+  
+  return diffWeeks + 1; // 加上 1 代表第一週
+};
+
+// Helper: 根據週次反推該週的起訖日期字串 (用於榮譽榜顯示)
+const getWeekRangeString = (weekNum, startStr) => {
+  if (!startStr) return "";
+  const start = parseLocalDate(startStr);
+  
+  // 學期第一週的星期日
+  const startSunday = new Date(start);
+  startSunday.setDate(start.getDate() - start.getDay());
+  
+  // 目標週的星期日
+  const targetSunday = new Date(startSunday);
+  targetSunday.setDate(startSunday.getDate() + (weekNum - 1) * 7);
+  
+  // 目標週的星期六
+  const targetSaturday = new Date(targetSunday);
+  targetSaturday.setDate(targetSunday.getDate() + 6);
+  
+  const formatStr = (d) => `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+  return `第 ${weekNum} 週 (${formatStr(targetSunday)} ~ ${formatStr(targetSaturday)})`;
+};
+
+// Helper: 產生班級陣列
 const generateClasses = (grade, counts) => 
   Array.from({ length: counts[grade] || 0 }, (_, i) => `${grade}${String(i + 1).padStart(2, '0')}`);
 
-// Helper: Get Week Number
-const getWeekNumber = (d) => {
-  if (!d || isNaN(d.getTime())) return "Invalid-Date";
-  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-  var yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  var weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
-};
 
 const App = () => {
   // --- State ---
@@ -80,28 +120,27 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  // Settings State
-  const [classCounts, setClassCounts] = useState(DEFAULT_CLASS_COUNTS);
+  // Settings State (整合型)
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [tempCounts, setTempCounts] = useState(DEFAULT_CLASS_COUNTS); // For editing in modal
+  const [tempSettings, setTempSettings] = useState(DEFAULT_SETTINGS); 
 
   // UI Components State
   const [modalConfig, setModalConfig] = useState({ isOpen: false, type: '', title: '', message: '', onConfirm: null });
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminModal, setShowAdminModal] = useState(false);
-  const [adminAction, setAdminAction] = useState(null); // 'CLEAR_HISTORY' | 'OPEN_SETTINGS'
+  const [adminAction, setAdminAction] = useState(null); 
 
   // Scoring Form State
-  // 修改這裡：使用 getLocalDateString() 而非 toISOString()
   const [selectedDate, setSelectedDate] = useState(getLocalDateString());
   const [selectedPeriod, setSelectedPeriod] = useState("早自修");
   const [selectedGrade, setSelectedGrade] = useState(1);
   const [currentScores, setCurrentScores] = useState({}); 
-  const [feedback, setFeedback] = useState(""); // 反映事項
+  const [feedback, setFeedback] = useState(""); 
 
-  // Ranking View State
-  const [viewWeek, setViewWeek] = useState(getWeekNumber(new Date()));
+  // Ranking View State (改為紀錄整數週次)
+  const [viewWeekNum, setViewWeekNum] = useState(1);
 
   // --- Auth & Sync ---
   useEffect(() => {
@@ -109,8 +148,8 @@ const App = () => {
       try {
         await signInAnonymously(auth);
       } catch (e) {
-        console.error("Firebase Auth Error:", e);
-        showToast(`登入失敗: ${e.message}`, 'error');
+        console.error("Auth Error:", e);
+        showToast(`登入失敗`, 'error');
       }
     };
     initAuth();
@@ -122,52 +161,50 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // Sync Scores Data
+  // Sync Settings Data (先載入設定)
   useEffect(() => {
     if (!authReady || !user) return;
-    
-    // 限制讀取最新 500 筆
-    const q = query(
-      collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
-      orderBy('createdAt', 'desc'),
-      limit(500) 
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setScoresData(data);
-      setLoading(false);
-    }, (error) => {
-      console.error("Snapshot Error:", error);
-      if (error.code !== 'permission-denied') {
-        showToast("無法讀取資料，請檢查網路", 'error');
-      }
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, [authReady, user]);
-
-  // Sync Settings Data
-  useEffect(() => {
-    if (!authReady || !user) return;
-
     try {
       const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', SETTINGS_COLLECTION, SETTINGS_DOC_ID);
       const unsubscribe = onSnapshot(docRef, (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          if (data.classCounts) {
-            setClassCounts(data.classCounts);
-          }
+          // 若有舊設定，與預設值合併確保屬性完整
+          const mergedSettings = { ...DEFAULT_SETTINGS, ...data };
+          setSettings(mergedSettings);
+          
+          // 當設定載入完成，初始化目前畫面為「今天的週次」
+          const currentWeek = getSemesterWeek(getLocalDateString(), mergedSettings.semesterStart);
+          setViewWeekNum(currentWeek);
+        } else {
+           // 找不到設定時，預設現在這週
+           setViewWeekNum(getSemesterWeek(getLocalDateString(), DEFAULT_SETTINGS.semesterStart));
         }
-      }, (error) => {
-        console.error("Settings Sync Error:", error);
       });
       return () => unsubscribe();
     } catch (e) {
-      console.error("Invalid Path Error:", e);
+      console.error("Settings Sync Error:", e);
     }
   }, [authReady, user]);
+
+  // Sync Scores Data
+  useEffect(() => {
+    if (!authReady || !user) return;
+    const q = query(
+      collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
+      orderBy('createdAt', 'desc'),
+      limit(500) 
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setScoresData(data);
+      setLoading(false);
+    }, (error) => {
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [authReady, user]);
+
 
   // --- Helper UI Functions ---
   const showToast = (message, type = 'success') => {
@@ -181,44 +218,192 @@ const App = () => {
   };
 
   // --- Calculations ---
+  
+  // 計算評分頁面「選擇日期」當週的總分
   const currentWeekTotals = useMemo(() => {
-    const todayWeek = getWeekNumber(new Date(selectedDate)); 
-    const filtered = scoresData.filter(d => d.week === todayWeek);
-    const totals = {}; 
-    // Init with current class config
-    GRADES.forEach(g => generateClasses(g, classCounts).forEach(c => totals[c] = 0));
+    // 利用目標日期與設定檔，算出目標週次
+    const selectedWeekNum = getSemesterWeek(selectedDate, settings.semesterStart); 
     
+    // 過濾出同樣屬於該週次的歷史資料
+    const filtered = scoresData.filter(d => getSemesterWeek(d.date, settings.semesterStart) === selectedWeekNum);
+    const totals = {}; 
+    
+    GRADES.forEach(g => generateClasses(g, settings.classCounts).forEach(c => totals[c] = 0));
     filtered.forEach(record => {
       if (totals[record.classId] === undefined) totals[record.classId] = 0;
       totals[record.classId] += record.score;
     });
     return totals; 
-  }, [scoresData, selectedDate, classCounts]);
+  }, [scoresData, selectedDate, settings]);
 
-  const weeklyRankings = useMemo(() => {
-    const filtered = scoresData.filter(d => d.week === viewWeek);
-    const totals = {}; 
-    GRADES.forEach(g => generateClasses(g, classCounts).forEach(c => totals[c] = 0));
-    
-    filtered.forEach(record => {
-      if (totals[record.classId] === undefined) totals[record.classId] = 0;
-      totals[record.classId] += record.score;
-    });
-    const result = {};
+  // 計算排行榜的資料 (加入平手判定機制與三連霸紀錄)
+  const rankingStats = useMemo(() => {
+    // 為了實作「歷史 tie-breaker」，必須從第 1 週開始模擬計算到目前的 viewWeekNum
+    const maxWeek = Math.max(viewWeekNum, ...scoresData.map(d => getSemesterWeek(d.date, settings.semesterStart)), 1);
+    const rankingsMap = {};
+    const history = {}; // 紀錄歷史獎項: { [grade]: { [classId]: { firsts: 0, awards: 0, lastWeekFirst: false, streak: 0 } } }
+
+    // 初始化歷史紀錄
     GRADES.forEach(g => {
-      const gradeClasses = Object.keys(totals).filter(c => c.startsWith(String(g)));
-      const sorted = gradeClasses.map(c => ({ classId: c, total: totals[c] }))
-                                 .sort((a, b) => b.total - a.total);
-      result[g] = sorted;
+        history[g] = {};
+        generateClasses(g, settings.classCounts).forEach(c => {
+            history[g][c] = { firsts: 0, awards: 0, lastWeekFirst: false, streak: 0 };
+        });
     });
-    return result;
-  }, [scoresData, viewWeek, classCounts]);
 
-  const currentWeekLabel = useMemo(() => {
-     const parts = viewWeek.split('-W');
-     if (parts.length !== 2) return viewWeek;
-     return `${parts[0]}年 第 ${parts[1]} 週`;
-  }, [viewWeek]);
+    // 依序計算每週的排行榜，以建立穩定的歷史狀態
+    for (let w = 1; w <= maxWeek; w++) {
+        rankingsMap[w] = {};
+        const weekRecords = scoresData.filter(d => getSemesterWeek(d.date, settings.semesterStart) === w);
+
+        GRADES.forEach(g => {
+            const gradeClasses = generateClasses(g, settings.classCounts);
+            const totals = {};
+            const earliestTimes = {}; // 紀錄各班當週「最早獲得加分」的時間戳記
+
+            // 初始化
+            gradeClasses.forEach(c => {
+                totals[c] = 0;
+                earliestTimes[c] = Infinity;
+            });
+
+            // 計算當週總分與最早加分時間
+            weekRecords.forEach(r => {
+                if (r.classId.startsWith(String(g))) {
+                    totals[r.classId] += r.score;
+                    // 若是加分，且有時間戳記，則更新最早時間
+                    if (r.score > 0 && r.createdAt) {
+                        const time = r.createdAt.seconds || Infinity;
+                        if (time < earliestTimes[r.classId]) {
+                            earliestTimes[r.classId] = time;
+                        }
+                    }
+                }
+            });
+
+            // 先依據總分進行分組 (例如: { 10: ["101", "102"], 8: ["103"] })
+            const grouped = {};
+            gradeClasses.forEach(c => {
+                const score = totals[c];
+                if (!grouped[score]) grouped[score] = [];
+                grouped[score].push(c);
+            });
+
+            // 取得由大到小的分數陣列
+            const sortedScores = Object.keys(grouped).map(Number).sort((a, b) => b - a);
+
+            let currentRankIndex = 0; // 用來追蹤現在正在排第幾名 (0=第一名, 1=第二名)
+            const finalSortedClasses = [];
+
+            sortedScores.forEach(score => {
+                let tiedClasses = grouped[score];
+
+                // 當發生同分時，觸發 Tie-breaker 規則
+                if (tiedClasses.length > 1) {
+                    // 如果這組同分班級正在爭奪【第一名】
+                    if (currentRankIndex === 0) {
+                        tiedClasses.sort((a, b) => {
+                            const histA = history[g][a] || { lastWeekFirst: false, firsts: 0 };
+                            const histB = history[g][b] || { lastWeekFirst: false, firsts: 0 };
+
+                            // 條件1：上週也是第一名的優先
+                            if (histA.lastWeekFirst !== histB.lastWeekFirst) return histA.lastWeekFirst ? -1 : 1;
+                            
+                            // 條件2：最少拿第一名的優先 (次數由少到多排序)
+                            if (histA.firsts !== histB.firsts) return histA.firsts - histB.firsts;
+                            
+                            // 條件3：當週最先拿到分數優先 (時間由小到大排序)
+                            if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
+                            
+                            // 條件4：隨機 (使用班級名稱字母順序作為穩定的隨機，避免畫面名次閃爍)
+                            return a.localeCompare(b);
+                        });
+                    }
+                    // 如果這組同分班級正在爭奪【第二名】
+                    else if (currentRankIndex === 1) {
+                        tiedClasses.sort((a, b) => {
+                            const histA = history[g][a] || { awards: 0 };
+                            const histB = history[g][b] || { awards: 0 };
+
+                            // 條件1：最少獲獎(一或二名)的優先 (次數由少到多排序)
+                            if (histA.awards !== histB.awards) return histA.awards - histB.awards;
+                            
+                            // 條件2：當週最先拿到分數優先
+                            if (earliestTimes[a] !== earliestTimes[b]) return earliestTimes[a] - earliestTimes[b];
+                            
+                            // 條件3：隨機
+                            return a.localeCompare(b);
+                        });
+                    }
+                    // 若是第三名以後的同分，只做簡單的班級名稱排序
+                    else {
+                        tiedClasses.sort((a, b) => a.localeCompare(b));
+                    }
+                }
+
+                // 將排序好的班級依序推入最終陣列，並佔用名次空位
+                tiedClasses.forEach(c => {
+                    finalSortedClasses.push({
+                        classId: c,
+                        total: score
+                    });
+                    currentRankIndex++; 
+                });
+            });
+
+            // 更新歷史紀錄供「下一週」的判定使用 (包含重置沒拿第一名的連霸次數)
+            gradeClasses.forEach(c => {
+                if (history[g][c]) {
+                    history[g][c].lastWeekFirst = false;
+                    // 如果該班級不是當週第一名，則連霸次數中斷歸零
+                    if (finalSortedClasses.length === 0 || c !== finalSortedClasses[0].classId) {
+                        history[g][c].streak = 0;
+                    }
+                }
+            });
+
+            if (finalSortedClasses.length > 0) {
+                const top1 = finalSortedClasses[0].classId;
+                if (history[g][top1]) {
+                    history[g][top1].firsts += 1;
+                    history[g][top1].awards += 1; // 第一名也算一次獲獎
+                    history[g][top1].lastWeekFirst = true;
+                    
+                    // 增加連霸次數
+                    history[g][top1].streak += 1;
+                    
+                    // 檢查是否達成三連霸
+                    if (history[g][top1].streak === 3) {
+                        finalSortedClasses[0].isThreeWeekChamp = true;
+                        history[g][top1].streak = 0; // 觸發後歸零重新計算
+                    }
+                }
+            }
+            if (finalSortedClasses.length > 1) {
+                const top2 = finalSortedClasses[1].classId;
+                if (history[g][top2]) {
+                    history[g][top2].awards += 1; // 第二名獲獎
+                }
+            }
+
+            rankingsMap[w] = finalSortedClasses;
+        });
+    }
+
+    return {
+        currentRankings: rankingsMap[viewWeekNum] || {},
+        allRankings: rankingsMap,
+        maxAvailableWeek: maxWeek
+    };
+  }, [scoresData, viewWeekNum, settings]);
+
+  const currentRankings = rankingStats.currentRankings;
+  const allRankings = rankingStats.allRankings;
+  const maxAvailableWeek = rankingStats.maxAvailableWeek;
+
+  const currentWeekLabel = getWeekRangeString(viewWeekNum, settings.semesterStart);
+  // 新增：計算「現實中」的今天是第幾週，用來作為提示
+  const realCurrentWeek = getSemesterWeek(getLocalDateString(), settings.semesterStart);
 
   // --- Handlers ---
   const handleScoreChange = (classId, val) => {
@@ -230,11 +415,20 @@ const App = () => {
     if (Object.keys(currentScores).length === 0) return showToast("請至少評分一個班級", 'error');
     if (!selectedDate) return showToast("請選擇日期", 'error');
 
+    // 防呆：檢查日期是否在學期範圍內 (可選，目前只做提醒)
+    const selTime = parseLocalDate(selectedDate).getTime();
+    const startTime = parseLocalDate(settings.semesterStart).getTime();
+    const endTime = parseLocalDate(settings.semesterEnd).getTime();
+    let warningMsg = "";
+    if(selTime < startTime || selTime > endTime) {
+        warningMsg = "\n(注意：此日期不在設定的學期範圍內！)";
+    }
+
     setModalConfig({
       isOpen: true,
       type: 'confirm',
       title: '確認儲存',
-      message: `確定要儲存 ${selectedDate} [${selectedPeriod}] 的評分嗎？`,
+      message: `確定要儲存 ${selectedDate} [${selectedPeriod}] 的評分嗎？${warningMsg}`,
       onConfirm: executeSubmit
     });
   };
@@ -245,7 +439,8 @@ const App = () => {
 
     try {
       const batch = writeBatch(db);
-      const weekNum = getWeekNumber(new Date(selectedDate));
+      // 動態計算此次評分的週次並存入 (也可不用存，全靠 date 即時計算，但存起來可以做為雙重參考)
+      const weekNum = getSemesterWeek(selectedDate, settings.semesterStart);
       const timestamp = serverTimestamp();
       const raterUid = user.uid; 
       
@@ -258,7 +453,7 @@ const App = () => {
         if (!isNaN(gradeNum) && !isNaN(scoreNum)) {
           batch.set(docRef, {
             date: selectedDate,
-            week: weekNum,
+            weekIndex: weekNum, // 新增紀錄整數週次
             period: selectedPeriod,
             grade: gradeNum,
             classId: String(classId),
@@ -280,7 +475,6 @@ const App = () => {
         showToast("沒有有效的評分數據", 'error');
       }
     } catch (e) {
-      console.error("Submit Error:", e);
       showToast(`儲存失敗: ${e.message}`, 'error');
     } finally {
       setSubmitting(false);
@@ -324,11 +518,10 @@ const App = () => {
     setShowAdminModal(false);
     setAdminPassword('');
     
-    // Dispatch Action
     if (adminAction === 'CLEAR_HISTORY') {
       confirmClearHistory();
     } else if (adminAction === 'OPEN_SETTINGS') {
-      setTempCounts({...classCounts}); // Init temp state with current values
+      setTempSettings({...settings}); // 載入目前設定供編輯
       setShowSettingsModal(true);
     }
   };
@@ -350,7 +543,7 @@ const App = () => {
           await batch.commit();
           showToast("所有資料已清空", 'success');
         } catch (e) {
-          showToast(`清空失敗: ${e.message}`, 'error');
+          showToast(`清空失敗`, 'error');
         } finally {
           setSubmitting(false);
         }
@@ -359,11 +552,15 @@ const App = () => {
   };
 
   const saveSettings = async () => {
+    if(!tempSettings.semesterStart || !tempSettings.semesterEnd) {
+      return showToast("請完整填寫學期起訖日期", "error");
+    }
+    
     setShowSettingsModal(false);
     setSubmitting(true);
     try {
         const docRef = doc(db, 'artifacts', APP_ID_PATH, 'public', 'data', SETTINGS_COLLECTION, SETTINGS_DOC_ID);
-        await setDoc(docRef, { classCounts: tempCounts }, { merge: true });
+        await setDoc(docRef, tempSettings, { merge: true });
         showToast("系統設定已更新", 'success');
     } catch(e) {
         showToast(`設定儲存失敗: ${e.message}`, 'error');
@@ -372,14 +569,9 @@ const App = () => {
     }
   };
 
+  // 變更觀看的週次
   const changeWeek = (delta) => {
-    const [year, week] = viewWeek.split('-W').map(Number);
-    if (!year || !week) return;
-    let newYear = year;
-    let newWeek = week + delta;
-    if (newWeek > 52) { newWeek = 1; newYear++; }
-    if (newWeek < 1) { newWeek = 52; newYear--; }
-    setViewWeek(`${newYear}-W${String(newWeek).padStart(2, '0')}`);
+    setViewWeekNum(prev => prev + delta);
   };
 
   // --- Sub-Components ---
@@ -447,7 +639,18 @@ const App = () => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 pb-20 relative">
+    <>
+    {/* 列印專用的全域樣式 */}
+    <style>{`
+      @media print {
+        body { background: white !important; margin: 0; padding: 0; }
+        .no-print { display: none !important; }
+        .print-only { display: block !important; }
+        @page { margin: 15mm; }
+      }
+    `}</style>
+
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 pb-20 relative no-print">
       
       {/* Custom Modal Overlay */}
       {modalConfig.isOpen && (
@@ -458,7 +661,7 @@ const App = () => {
               <h3 className="font-bold text-lg text-slate-800">{modalConfig.title}</h3>
             </div>
             <div className="p-6">
-              <p className="text-slate-600 font-medium">{modalConfig.message}</p>
+              <p className="text-slate-600 font-medium whitespace-pre-line">{modalConfig.message}</p>
             </div>
             <div className="p-4 bg-slate-50 flex gap-3">
               <button onClick={closeModal} className="flex-1 py-2.5 text-slate-500 font-bold hover:bg-slate-200 rounded-lg transition-colors">取消</button>
@@ -499,37 +702,78 @@ const App = () => {
         </div>
       )}
 
-      {/* Settings Modal */}
+      {/* Settings Modal - 新增學期起訖 */}
       {showSettingsModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-fade-in">
-          <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden">
-             <div className="p-4 bg-slate-800 text-white flex items-center gap-2">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden max-h-[90vh] overflow-y-auto">
+             <div className="p-4 bg-slate-800 text-white flex items-center gap-2 sticky top-0 z-10">
               <Settings size={20}/>
               <h3 className="font-bold">系統參數設定</h3>
             </div>
-            <div className="p-6 space-y-4">
-              <p className="text-sm text-slate-500 border-b border-slate-100 pb-2">請設定各年級的班級總數：</p>
-              {GRADES.map(grade => (
-                <div key={grade} className="flex items-center justify-between">
-                  <label className="font-bold text-slate-700">{grade} 年級</label>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={() => setTempCounts(prev => ({...prev, [grade]: Math.max(1, (prev[grade] || 0) - 1)}))}
-                      className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
-                    >-</button>
-                    <span className="w-12 text-center font-bold text-xl">{tempCounts[grade]} 班</span>
-                    <button 
-                      onClick={() => setTempCounts(prev => ({...prev, [grade]: Math.min(20, (prev[grade] || 0) + 1)}))}
-                      className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
-                    >+</button>
+            <div className="p-6 space-y-6">
+              
+              {/* 學期設定 */}
+              <div>
+                <h4 className="font-bold text-slate-700 flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                   <CalendarDays size={18}/> 學期日期區間
+                </h4>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 mb-1">學期開始日期 (作為第1週起點)</label>
+                    <input 
+                      type="date" 
+                      value={tempSettings.semesterStart}
+                      onChange={(e) => setTempSettings(prev => ({...prev, semesterStart: e.target.value}))}
+                      className="w-full p-2 border border-slate-300 rounded bg-slate-50 outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 mb-1">學期結束日期</label>
+                    <input 
+                      type="date" 
+                      value={tempSettings.semesterEnd}
+                      onChange={(e) => setTempSettings(prev => ({...prev, semesterEnd: e.target.value}))}
+                      className="w-full p-2 border border-slate-300 rounded bg-slate-50 outline-none focus:border-indigo-500"
+                    />
                   </div>
                 </div>
-              ))}
-              <div className="text-xs text-slate-400 bg-slate-50 p-2 rounded mt-2">
-                注意：減少班級數將導致該班級從評分表中隱藏，但歷史數據仍會保留。
+              </div>
+
+              {/* 班級數量設定 */}
+              <div>
+                 <h4 className="font-bold text-slate-700 flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                   <School size={18}/> 各年級班級總數
+                 </h4>
+                <div className="space-y-3">
+                  {GRADES.map(grade => (
+                    <div key={grade} className="flex items-center justify-between">
+                      <label className="font-bold text-slate-600">{grade} 年級</label>
+                      <div className="flex items-center gap-2">
+                        <button 
+                          onClick={() => setTempSettings(prev => ({
+                            ...prev, 
+                            classCounts: {...prev.classCounts, [grade]: Math.max(1, (prev.classCounts[grade] || 0) - 1)}
+                          }))}
+                          className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
+                        >-</button>
+                        <span className="w-12 text-center font-bold text-lg">{tempSettings.classCounts[grade]} 班</span>
+                        <button 
+                          onClick={() => setTempSettings(prev => ({
+                            ...prev, 
+                            classCounts: {...prev.classCounts, [grade]: Math.min(20, (prev.classCounts[grade] || 0) + 1)}
+                          }))}
+                          className="w-8 h-8 rounded bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600"
+                        >+</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="text-xs text-slate-400 bg-yellow-50 p-3 rounded border border-yellow-100">
+                注意：減少班級數將隱藏該班級，但歷史數據保留。變更學期開始日會重新計算所有榮譽榜的週次。
               </div>
             </div>
-            <div className="p-4 bg-slate-50 flex gap-3">
+            <div className="p-4 bg-slate-50 flex gap-3 sticky bottom-0 border-t border-slate-100">
               <button onClick={() => setShowSettingsModal(false)} className="flex-1 py-2 text-slate-500 font-bold hover:bg-slate-200 rounded-lg">取消</button>
               <button onClick={saveSettings} className="flex-1 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 shadow">儲存設定</button>
             </div>
@@ -647,7 +891,7 @@ const App = () => {
             </div>
 
             <div className="space-y-3 mb-6">
-              {generateClasses(selectedGrade, classCounts).map(classId => (
+              {generateClasses(selectedGrade, settings.classCounts).map(classId => (
                 <ClassScoreRow 
                   key={classId} 
                   classId={classId} 
@@ -697,17 +941,29 @@ const App = () => {
         {/* RANKING TAB */}
         {activeTab === 'ranking' && (
           <div className="animate-fade-in space-y-6">
-            <div className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200">
-              <button onClick={() => changeWeek(-1)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200"><ChevronLeft size={20}/></button>
-              <div className="text-center">
-                <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">目前檢視</div>
-                <div className="text-xl font-black text-indigo-900">{currentWeekLabel}</div>
+            <div className="flex flex-col sm:flex-row items-center justify-between bg-white p-4 rounded-xl shadow-sm border border-slate-200 gap-3">
+              <button onClick={() => changeWeek(-1)} className="p-2 w-full sm:w-auto bg-slate-100 rounded hover:bg-slate-200 flex justify-center"><ChevronLeft size={20}/></button>
+              <div className="text-center flex flex-col items-center">
+                <div className="text-xs text-slate-400 font-bold uppercase tracking-wider mb-1">目前檢視</div>
+                <div className="text-lg sm:text-xl font-black text-indigo-900 bg-indigo-50 px-4 py-1 rounded-full mb-2">{currentWeekLabel}</div>
+                {/* 新增：提示本週是第幾週 */}
+                <div className="text-xs font-bold text-slate-500 bg-slate-50 inline-block px-3 py-1 rounded-full border border-slate-200 shadow-sm">
+                  💡 提示：本週是第 {realCurrentWeek} 週
+                </div>
               </div>
-              <button onClick={() => changeWeek(1)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200"><ChevronRight size={20}/></button>
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button 
+                  onClick={() => window.print()} 
+                  className="flex-1 sm:flex-none p-2 bg-slate-800 text-white rounded hover:bg-slate-700 flex justify-center items-center gap-1 text-sm font-bold shadow"
+                >
+                  <Printer size={16}/> 列印
+                </button>
+                <button onClick={() => changeWeek(1)} className="flex-1 sm:flex-none p-2 bg-slate-100 rounded hover:bg-slate-200 flex justify-center"><ChevronRight size={20}/></button>
+              </div>
             </div>
 
             {GRADES.map(grade => {
-              const data = weeklyRankings[grade] || [];
+              const data = currentRankings[grade] || [];
               const top1 = data[0];
               const top2 = data[1];
 
@@ -724,6 +980,11 @@ const App = () => {
                   <div className="grid grid-cols-2 gap-4 p-4 bg-gradient-to-b from-white to-slate-50">
                     {/* Winner */}
                     <div className="flex flex-col items-center relative mt-4">
+                      {top1?.isThreeWeekChamp && (
+                        <div className="absolute -top-11 left-1/2 -translate-x-1/2 bg-red-500 text-white text-xs font-black px-3 py-1.5 rounded-full shadow-lg border-2 border-red-200 animate-bounce whitespace-nowrap z-30 flex items-center gap-1 tracking-widest">
+                           🔥 三連霸
+                        </div>
+                      )}
                       <Trophy className="text-yellow-400 drop-shadow-sm absolute -top-6" size={32} fill="currentColor"/>
                       <div className="w-full bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 text-center shadow-sm relative z-10">
                         <div className="text-xs font-bold text-yellow-600 uppercase mb-1">第一名</div>
@@ -792,7 +1053,7 @@ const App = () => {
                  <table className="w-full text-sm">
                    <thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0">
                      <tr>
-                       <th className="p-3 text-left">時間/班級</th>
+                       <th className="p-3 text-left w-24 sm:w-auto">時間/班級</th>
                        <th className="p-3 text-left">項目</th>
                        <th className="p-3 text-right">分數</th>
                        <th className="p-3 w-10"></th>
@@ -803,8 +1064,12 @@ const App = () => {
                        <tr key={record.id} className="hover:bg-slate-50 group">
                          <td className="p-3">
                            <div className="font-bold text-slate-700">{record.classId}</div>
-                           <div className="text-xs text-slate-400">{record.date}</div>
-                           {/* 顯示備註 */}
+                           <div className="text-xs text-slate-400">
+                             {record.date} 
+                             <span className="ml-1 hidden sm:inline-block bg-slate-100 text-slate-400 px-1 rounded text-[10px]">
+                               W{getSemesterWeek(record.date, settings.semesterStart)}
+                             </span>
+                           </div>
                            {record.note && (
                              <div className="mt-1 text-xs text-slate-500 flex items-start gap-1 bg-slate-50 p-1 rounded">
                                 <MessageSquare size={10} className="mt-0.5 shrink-0"/>
@@ -813,7 +1078,7 @@ const App = () => {
                            )}
                          </td>
                          <td className="p-3">
-                           <span className="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded-full border border-indigo-100">
+                           <span className="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded-full border border-indigo-100 whitespace-nowrap">
                              {record.period}
                            </span>
                          </td>
@@ -843,6 +1108,70 @@ const App = () => {
         )}
       </main>
     </div>
+
+    {/* 列印專用排版 (平時隱藏，僅在列印時顯示) */}
+    <div className="hidden print:block print-only absolute top-0 left-0 w-full bg-white text-black p-8">
+       <h1 className="text-3xl font-black text-center mb-6 border-b-2 border-black pb-4">校園秩序評分榮譽榜</h1>
+       
+       <h2 className="text-2xl font-bold mb-4">{currentWeekLabel} - 當週得獎名單</h2>
+       <table className="w-full border-collapse border-2 border-black mb-10 text-center text-lg">
+         <thead>
+           <tr className="bg-gray-100">
+             <th className="border border-black p-3 w-1/3">年級</th>
+             <th className="border border-black p-3 w-1/3">第一名</th>
+             <th className="border border-black p-3 w-1/3">第二名</th>
+           </tr>
+         </thead>
+         <tbody>
+           {GRADES.map(grade => {
+             const data = currentRankings[grade] || [];
+             const top1 = data[0];
+             const top2 = data[1];
+             return (
+               <tr key={grade}>
+                 <td className="border border-black p-3 font-bold bg-gray-50">{grade} 年級</td>
+                 <td className="border border-black p-3 font-bold text-red-600">
+                   {top1 ? top1.classId : '-'}
+                   {top1?.isThreeWeekChamp && <span className="ml-2 text-xs bg-red-100 text-red-600 px-1 border border-red-300 rounded">三連霸</span>}
+                 </td>
+                 <td className="border border-black p-3 font-medium">{top2 ? top2.classId : '-'}</td>
+               </tr>
+             );
+           })}
+         </tbody>
+       </table>
+
+       <h2 className="text-2xl font-bold mb-4">本學期各週紀錄 (精簡彙整)</h2>
+       <table className="w-full border-collapse border border-black text-center">
+         <thead>
+           <tr className="bg-gray-100">
+             <th className="border border-black p-2 w-24">週次</th>
+             <th className="border border-black p-2">一年級 (一 / 二)</th>
+             <th className="border border-black p-2">二年級 (一 / 二)</th>
+             <th className="border border-black p-2">三年級 (一 / 二)</th>
+           </tr>
+         </thead>
+         <tbody>
+           {Array.from({ length: maxAvailableWeek }, (_, i) => i + 1).map(w => (
+             <tr key={w}>
+               <td className="border border-black p-2 font-bold whitespace-nowrap bg-gray-50">第 {w} 週</td>
+               {GRADES.map(g => {
+                 const wData = allRankings[w]?.[g] || [];
+                 const t1 = wData[0] ? wData[0].classId : '-';
+                 const t2 = wData[1] ? wData[1].classId : '-';
+                 const is3Win = wData[0]?.isThreeWeekChamp;
+                 return (
+                   <td key={g} className="border border-black p-2">
+                     <span className="font-bold text-red-600">{t1}</span> {is3Win && <span className="text-[10px] text-red-500">(三連霸)</span>} / <span>{t2}</span>
+                   </td>
+                 );
+               })}
+             </tr>
+           ))}
+         </tbody>
+       </table>
+    </div>
+    </>
   );
 };
 
