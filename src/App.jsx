@@ -341,34 +341,36 @@ const App = () => {
                 }
             });
 
-            // 更新歷史紀錄供「下一週」的判定使用
-            gradeClasses.forEach(c => {
-                if (history[g][c]) {
-                    history[g][c].lastWeekFirst = false;
-                    if (finalSortedClasses.length === 0 || c !== finalSortedClasses[0].classId) {
-                        history[g][c].streak = 0;
+            // 更新歷史紀錄供「下一週」的判定使用 (開學前不計入正式獲獎與連霸)
+            if (w >= 1) {
+                gradeClasses.forEach(c => {
+                    if (history[g][c]) {
+                        history[g][c].lastWeekFirst = false;
+                        if (finalSortedClasses.length === 0 || c !== finalSortedClasses[0].classId) {
+                            history[g][c].streak = 0;
+                        }
                     }
-                }
-            });
+                });
 
-            if (finalSortedClasses.length > 0) {
-                const top1 = finalSortedClasses[0].classId;
-                if (history[g][top1]) {
-                    history[g][top1].firsts += 1;
-                    history[g][top1].awards += 1; 
-                    history[g][top1].lastWeekFirst = true;
-                    history[g][top1].streak += 1;
-                    
-                    if (history[g][top1].streak === 3) {
-                        finalSortedClasses[0].isThreeWeekChamp = true;
-                        history[g][top1].streak = 0; 
+                if (finalSortedClasses.length > 0) {
+                    const top1 = finalSortedClasses[0].classId;
+                    if (history[g][top1]) {
+                        history[g][top1].firsts += 1;
+                        history[g][top1].awards += 1; 
+                        history[g][top1].lastWeekFirst = true;
+                        history[g][top1].streak += 1;
+                        
+                        if (history[g][top1].streak === 3) {
+                            finalSortedClasses[0].isThreeWeekChamp = true;
+                            history[g][top1].streak = 0; 
+                        }
                     }
                 }
-            }
-            if (finalSortedClasses.length > 1) {
-                const top2 = finalSortedClasses[1].classId;
-                if (history[g][top2]) {
-                    history[g][top2].awards += 1; 
+                if (finalSortedClasses.length > 1) {
+                    const top2 = finalSortedClasses[1].classId;
+                    if (history[g][top2]) {
+                        history[g][top2].awards += 1; 
+                    }
                 }
             }
 
@@ -380,8 +382,8 @@ const App = () => {
     return {
         currentRankings: rankingsMap[viewWeekNum] || {},
         allRankings: rankingsMap,
-        minAvailableWeek: minWeek, // 新增：輸出最小週次供列印表使用
-        maxAvailableWeek: maxWeek
+        minAvailableWeek: Math.max(1, minWeek), // 確保列印表只顯示正式學期(第1週起)
+        maxAvailableWeek: Math.max(1, maxWeek)
     };
   }, [scoresData, viewWeekNum, settings]);
 
