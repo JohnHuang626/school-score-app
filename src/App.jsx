@@ -1108,27 +1108,39 @@ const App = () => {
        <table className="w-full border-collapse border-2 border-black mb-10 text-center text-lg">
          <thead>
            <tr className="bg-gray-100">
-             <th className="border border-black p-3 w-1/3">年級</th>
-             <th className="border border-black p-3 w-1/3">第一名</th>
-             <th className="border border-black p-3 w-1/3">第二名</th>
+             <th className="border border-black p-3 w-1/4">名次</th>
+             <th className="border border-black p-3 w-3/4">班級 (三 / 二 / 一年級)</th>
            </tr>
          </thead>
          <tbody>
-           {GRADES.map(grade => {
-             const data = currentRankings[grade] || [];
-             const top1 = data[0];
-             const top2 = data[1];
-             return (
-               <tr key={grade}>
-                 <td className="border border-black p-3 font-bold bg-gray-50">{grade} 年級</td>
-                 <td className="border border-black p-3 font-bold text-red-600">
-                   {top1 ? top1.classId : '-'}
-                   {top1?.isThreeWeekChamp && <span className="ml-2 text-xs bg-red-100 text-red-600 px-1 border border-red-300 rounded">三連霸</span>}
-                 </td>
-                 <td className="border border-black p-3 font-medium">{top2 ? top2.classId : '-'}</td>
-               </tr>
-             );
-           })}
+           {/* 第一名 Row */}
+           <tr>
+             <td className="border border-black p-3 font-bold bg-gray-50 text-red-600">第一名</td>
+             <td className="border border-black p-3 font-bold text-red-600">
+               {[3, 2, 1].map(grade => {
+                 const data = currentRankings[grade] || [];
+                 const top1 = data[0];
+                 if (!top1) return '-';
+                 
+                 let text = top1.classId;
+                 if (top1.isThreeWeekChamp) {
+                   text += ' (三連霸)';
+                 }
+                 return text;
+               }).join(', ')}
+             </td>
+           </tr>
+           {/* 第二名 Row */}
+           <tr>
+             <td className="border border-black p-3 font-bold bg-gray-50">第二名</td>
+             <td className="border border-black p-3 font-medium">
+               {[3, 2, 1].map(grade => {
+                 const data = currentRankings[grade] || [];
+                 const top2 = data[1];
+                 return top2 ? top2.classId : '-';
+               }).join(', ')}
+             </td>
+           </tr>
          </tbody>
        </table>
 
