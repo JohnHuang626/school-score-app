@@ -190,10 +190,11 @@ const App = () => {
   // Sync Scores Data
   useEffect(() => {
     if (!authReady || !user) return;
+    // 將讀取上限提高至 10000 筆，確保整學期的紀錄都能完整載入以計算連霸與歷史排名
     const q = query(
       collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME),
       orderBy('createdAt', 'desc'),
-      limit(500) 
+      limit(10000) 
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -403,7 +404,12 @@ const App = () => {
 
   const handleConfirmSubmit = () => {
     if (!user) return showToast("系統尚未連線", 'error');
-    if (Object.keys(currentScores).length === 0) return showToast("請至少評分一個班級", 'error');
+    
+    // 檢查是否有非 0 的有效評分，或是有填寫反映事項
+    const validScores = Object.entries(currentScores).filter(([_, score]) => Number(score) !== 0);
+    if (validScores.length === 0 && !feedback.trim()) {
+      return showToast("請至少給予一個班級非 0 的評分，或填寫反映事項", 'error');
+    }
     if (!selectedDate) return showToast("請選擇日期", 'error');
 
     // 防呆：檢查日期是否在學期範圍內 (可選，目前只做提醒)
@@ -436,12 +442,17 @@ const App = () => {
       const raterUid = user.uid; 
       
       let opCount = 0;
-      Object.entries(currentScores).forEach(([classId, score]) => {
-        const docRef = doc(collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME));
+      const entries = Object.entries(currentScores);
+      
+      entries.forEach(([classId, score], idx) => {
         const gradeNum = parseInt(classId.substring(0, 1), 10);
         const scoreNum = Number(score);
         
-        if (!isNaN(gradeNum) && !isNaN(scoreNum)) {
+        // 優化空間：只儲存非 0 分的紀錄（若全為 0 分但有寫反映事項，則至少保留第一筆以記錄備註）
+        const isOnlyNoteRecord = scoreNum === 0 && feedback.trim() !== "" && entries.every(([_, s]) => Number(s) === 0) && idx === 0;
+
+        if (!isNaN(gradeNum) && !isNaN(scoreNum) && (scoreNum !== 0 || isOnlyNoteRecord)) {
+          const docRef = doc(collection(db, 'artifacts', APP_ID_PATH, 'public', 'data', COLLECTION_NAME));
           batch.set(docRef, {
             date: selectedDate,
             weekIndex: weekNum, // 新增紀錄整數週次
